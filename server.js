@@ -58,6 +58,14 @@ const USER_PROTECTED = [
   path.join(HOME, '..', 'Public').toLowerCase(),
 ].map((x) => x.replace(/\\+$/, '').toLowerCase());
 
+const TEMP_ROOTS = Array.from(
+  new Set(
+    [os.tmpdir(), path.join(HOME, 'AppData', 'Local', 'Temp')].map((x) =>
+      keyOf(path.win32.normalize(x).replace(/\\+$/, ''))
+    )
+  )
+);
+
 const ALWAYS_BLOCKED_ROOT_NAMES = [
   '$recycle.bin',
   'system volume information',
@@ -66,7 +74,7 @@ const ALWAYS_BLOCKED_ROOT_NAMES = [
   'efi',
   'krecycle',
 ];
-const SYSTEM_BLOCKED_ROOT_NAMES = ['windows', 'program files', 'program files (x86)', 'programdata', 'users'];
+const SYSTEM_BLOCKED_ROOT_NAMES = ['windows', 'program files', 'program files (x86)', 'programdata'];
 
 function normPath(input) {
   if (typeof input !== 'string' || !input.trim()) return null;
@@ -92,6 +100,10 @@ function checkDeletable(p) {
   const root = letter.toLowerCase() + ':\\';
   if (key === root) return `不能删除整个 ${letter} 盘`;
   if (USER_PROTECTED.includes(key)) return '这是用户重要目录，已禁止删除';
+  const usersPrefix = root + 'users\\';
+  if (key === root + 'users' || (key.startsWith(usersPrefix) && !key.slice(usersPrefix.length).includes('\\'))) {
+    return '用户目录本身受保护，请进入具体缓存目录再删除';
+  }
   if (key === APP_DIR.toLowerCase() || key === DATA_DIR.toLowerCase()) return '清理工具自身目录不可删除';
 
   for (const name of ALWAYS_BLOCKED_ROOT_NAMES) {
@@ -645,6 +657,31 @@ function dedupePaths(paths) {
     keptKeys.push(key);
   }
   return { paths: filtered, errors: errs };
+}
+
+// 临时目录本身被系统持续占用，删除整个目录容易失败；改为清理其中的项目，保留目录本身。
+async function expandTempRoots(paths) {
+  const out = [];
+  let expanded = 0;
+  for (const p of paths) {
+    if (!TEMP_ROOTS.includes(keyOf(p))) {
+      out.push(p);
+      continue;
+    }
+    try {
+      const entries = await fsp.readdir(p, { withFileTypes: true });
+      let count = 0;
+      for (const e of entries) {
+        if (e.isSymbolicLink()) continue;
+        out.push(path.win32.join(p, e.name));
+        count++;
+      }
+      expanded += count;
+    } catch (_) {
+      out.push(p);
+    }
+  }
+  return { paths: out, expanded };
 }
 
 async function validateDeletable(paths) {
@@ -1424,7 +1461,13 @@ async function handleApi(req, res, urlObj) {
       return json(res, 409, { error: '扫描进行中，请等待扫描完成后再删除', scanning: true });
     }
     if (body.paths.length > 200) return json(res, 400, { error: '一次最多处理 200 项' });
-    const { paths, errors: preErrors } = dedupePaths(body.paths);
+    let { paths, errors: preErrors } = dedupePaths(body.paths);
+    const expansion = await expandTempRoots(paths);
+    if (expansion.expanded) {
+      const again = dedupePaths(expansion.paths);
+      paths = again.paths;
+      preErrors = preErrors.concat(again.errors);
+    }
     const checks = await validateDeletable(paths);
     const valid = [];
     const results = [...preErrors];
@@ -1432,7 +1475,13 @@ async function handleApi(req, res, urlObj) {
       if (!c.ok) results.push(c);
       else valid.push(c);
     }
-    if (!valid.length) return json(res, 400, { results, error: '没有可删除的项目' });
+    if (!valid.length) {
+      const first = results.find((x) => x && x.error);
+      return json(res, 400, {
+        results,
+        error: first ? '没有可删除的项目：' + first.error : '没有可删除的项目',
+      });
+    }
 
     if (route === '/api/delete') {
       if (body.confirm !== 'DELETE') return json(res, 400, { error: '缺少永久删除确认' });
