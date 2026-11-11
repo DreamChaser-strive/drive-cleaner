@@ -8,11 +8,11 @@
 
 ## 下载桌面应用（推荐）
 
-直接下载应用文件：**[DriveCleaner-1.2.1-portable.exe](https://github.com/DreamChaser-strive/drive-cleaner/releases/download/v1.2.1/DriveCleaner-1.2.1-portable.exe)**
+直接下载应用文件：**[DriveCleaner-1.2.2-portable.exe](https://github.com/DreamChaser-strive/drive-cleaner/releases/download/v1.2.2/DriveCleaner-1.2.2-portable.exe)**
 
 也可以进入 **[Releases 页面](https://github.com/DreamChaser-strive/drive-cleaner/releases/latest)** 下载最新版。
 
-> 请不要下载页面底部的 `Source code (zip)`，那只是源码压缩包，不包含应用程序。应用文件必须以 `.exe` 结尾，文件名类似 `DriveCleaner-1.2.1-portable.exe`。
+> 请不要下载页面底部的 `Source code (zip)`，那只是源码压缩包，不包含应用程序。应用文件必须以 `.exe` 结尾，文件名类似 `DriveCleaner-1.2.2-portable.exe`。
 
 如果你已经下载了源码 ZIP，解压后双击 **`download-app.bat`**，脚本会从 Releases 自动下载最新 exe 到当前目录。
 
@@ -31,7 +31,8 @@
 - **目录明细**：查看子目录和文件大小，支持按大小排序、搜索和路径跳转。
 - **清理建议**：系统盘区分「推荐清理」「谨慎清理」「系统项目」；其他磁盘展示大目录快捷入口。
 - **两种删除方式**：默认移入回收站；永久删除需要二次勾选确认。
-- **安全防护**：禁止删除磁盘根目录；系统盘保护 Windows、Program Files、ProgramData、用户主目录等；所有磁盘均保护回收站和系统保留区域。
+- **安全防护**：禁止删除磁盘根目录；系统盘保护 Windows、Program Files、ProgramData、用户主目录本身等；所有磁盘均保护回收站和系统保留区域。
+- **缓存清理**：`AppData\Local\Temp` 等用户缓存目录可正常清理；临时目录本身会保留，只清理其中内容，避免被系统占用而失败。
 - **本地服务**：随机请求令牌 + 仅本机访问，不依赖云端。
 - **桌面封装**：Electron 原生窗口、单实例运行，关闭窗口即退出后台服务。
 
@@ -58,7 +59,7 @@ npm install
 npm run build:win
 ```
 
-生成的文件位于 `dist/DriveCleaner-1.2.1-portable.exe`。
+生成的文件位于 `dist/DriveCleaner-1.2.2-portable.exe`。
 
 ### 浏览器模式创建桌面快捷方式
 
@@ -77,7 +78,7 @@ npm run build:win
 
 **移入回收站**是默认方式，更安全，但在清空回收站之前不会释放磁盘空间。**永久删除**不可恢复，必须额外勾选确认，请只对确认无用的缓存或测试数据使用。
 
-以下位置不会被工具删除：任何磁盘的根目录、系统盘的 Windows、Program Files、ProgramData、用户主目录、桌面/文档/下载等个人目录、应用数据根目录、工具自身目录，以及系统关键文件。需要清理系统组件时，请使用 Windows 设置或官方卸载程序。
+以下位置不会被工具删除：任何磁盘的根目录、系统盘的 Windows、Program Files、ProgramData、用户主目录本身、桌面/文档/下载等个人目录、应用数据根目录、工具自身目录，以及系统关键文件。`AppData\Local\Temp` 等缓存目录可以清理，删除时只清理其中内容并保留 Temp 目录本身。需要清理系统组件时，请使用 Windows 设置或官方卸载程序。
 
 ## 数据与隐私
 
