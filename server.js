@@ -659,31 +659,6 @@ function dedupePaths(paths) {
   return { paths: filtered, errors: errs };
 }
 
-// 临时目录本身被系统持续占用，删除整个目录容易失败；改为清理其中的项目，保留目录本身。
-async function expandTempRoots(paths) {
-  const out = [];
-  let expanded = 0;
-  for (const p of paths) {
-    if (!TEMP_ROOTS.includes(keyOf(p))) {
-      out.push(p);
-      continue;
-    }
-    try {
-      const entries = await fsp.readdir(p, { withFileTypes: true });
-      let count = 0;
-      for (const e of entries) {
-        if (e.isSymbolicLink()) continue;
-        out.push(path.win32.join(p, e.name));
-        count++;
-      }
-      expanded += count;
-    } catch (_) {
-      out.push(p);
-    }
-  }
-  return { paths: out, expanded };
-}
-
 async function validateDeletable(paths) {
   const results = [];
   for (const p of paths) {
@@ -845,6 +820,110 @@ async function permanentDelete(p, isDir) {
   } catch (e) {
     return { path: p, ok: false, error: e.code === 'EBUSY' ? '文件正在被占用' : e.message };
   }
+}
+
+// 临时目录内通常有大量文件且部分被程序占用，逐个移入回收站会非常慢。
+// 先把未被占用的项目移动到同一盘内的暂存目录，再一次性回收，速度接近整目录回收。
+async function cleanTempRoot(p, permanent) {
+  const stage = path.win32.join(
+    p,
+    '.dcclean-' + Date.now().toString(36) + '-' + crypto.randomBytes(3).toString('hex')
+  );
+  const moved = [];
+  const skipped = [];
+  let entries;
+  try {
+    await fsp.mkdir(stage);
+    entries = await fsp.readdir(p, { withFileTypes: true });
+  } catch (e) {
+    return { ok: false, error: '无法读取临时目录：' + e.message, moved, skipped };
+  }
+  const stageName = path.win32.basename(stage).toLowerCase();
+  for (const e of entries) {
+    if (e.name.toLowerCase() === stageName) continue;
+    const src = path.win32.join(p, e.name);
+    try {
+      await fsp.rename(src, path.win32.join(stage, e.name));
+      moved.push(src);
+    } catch (_) {
+      skipped.push(src);
+    }
+  }
+  if (!moved.length) {
+    try {
+      await fsp.rmdir(stage);
+    } catch (_) {}
+    return {
+      ok: false,
+      error: skipped.length ? '临时目录中的项目正被程序占用，请关闭相关程序后重试' : '临时目录为空',
+      moved,
+      skipped,
+    };
+  }
+  let ok = false;
+  let error = null;
+  if (permanent) {
+    try {
+      await fsp.rm(stage, { recursive: true, force: false, maxRetries: 2 });
+      ok = true;
+    } catch (e) {
+      error = e.code === 'EBUSY' ? '文件正在被占用' : e.message;
+    }
+  } else {
+    const res = await runRecycle([stage]);
+    const r = res[0];
+    ok = !!(r && r.ok);
+    error = ok ? null : (r && r.error) || '回收站操作失败';
+  }
+  if (!ok) {
+    for (const src of moved) {
+      try {
+        await fsp.rename(path.win32.join(stage, path.win32.basename(src)), src);
+      } catch (_) {}
+    }
+    try {
+      await fsp.rmdir(stage);
+    } catch (_) {}
+    return { ok: false, error, moved: [], skipped };
+  }
+  return { ok: true, error: null, moved, skipped };
+}
+
+function applyTempPartialRemoval(st, rootPath, moved) {
+  if (!st.scan || !moved.length) return;
+  const rootKey = keyOf(rootPath);
+  const names = new Set(moved.map((x) => path.win32.basename(x).toLowerCase()));
+  let total = 0;
+  for (const src of moved) {
+    const rec = st.dirsMap.get(keyOf(src));
+    if (rec) total += rec.s || 0;
+  }
+  const prefix = rootKey + '\\';
+  for (const key of Array.from(st.dirsMap.keys())) {
+    if (!key.startsWith(prefix)) continue;
+    const seg = key.slice(prefix.length).split('\\')[0];
+    if (names.has(seg)) st.dirsMap.delete(key);
+  }
+  const rec = st.dirsMap.get(rootKey);
+  if (rec) {
+    if (Array.isArray(rec.c)) rec.c = rec.c.filter((x) => !names.has(String(x[0]).toLowerCase()));
+    rec.s = Math.max(0, (rec.s || 0) - total);
+  }
+  let ancestor = path.win32.dirname(rootPath);
+  if (ancestor.length === 2) ancestor += '\\';
+  for (let guard = 0; guard < 200; guard++) {
+    const ar = st.dirsMap.get(keyOf(ancestor));
+    if (ar) ar.s = Math.max(0, (ar.s || 0) - total);
+    if (keyOf(ancestor) === st.root.toLowerCase()) break;
+    const next = path.win32.dirname(ancestor);
+    if (!next || next === ancestor) break;
+    ancestor = next;
+    if (ancestor.length === 2) ancestor += '\\';
+  }
+  if (st.scan.stats) st.scan.stats.bytes = Math.max(0, (st.scan.stats.bytes || 0) - total);
+  suggestionSizeCache.clear();
+  st.scan.modifiedAt = new Date().toISOString();
+  saveScanSoon(st);
 }
 
 // ---------- 清理建议 ----------
@@ -1461,13 +1540,7 @@ async function handleApi(req, res, urlObj) {
       return json(res, 409, { error: '扫描进行中，请等待扫描完成后再删除', scanning: true });
     }
     if (body.paths.length > 200) return json(res, 400, { error: '一次最多处理 200 项' });
-    let { paths, errors: preErrors } = dedupePaths(body.paths);
-    const expansion = await expandTempRoots(paths);
-    if (expansion.expanded) {
-      const again = dedupePaths(expansion.paths);
-      paths = again.paths;
-      preErrors = preErrors.concat(again.errors);
-    }
+    const { paths, errors: preErrors } = dedupePaths(body.paths);
     const checks = await validateDeletable(paths);
     const valid = [];
     const results = [...preErrors];
@@ -1497,16 +1570,43 @@ async function handleApi(req, res, urlObj) {
       });
     }
 
+    const permanent = route === '/api/delete';
     let outcomes = [];
-    if (route === '/api/recycle') {
-      outcomes = await runRecycle(valid.map((x) => x.path));
-    } else {
-      for (const item of valid) {
-        outcomes.push(await permanentDelete(item.path, !!item.isDir));
+    const tempHandled = new Map();
+    const normal = [];
+    for (const item of valid) {
+      if (item.isDir && TEMP_ROOTS.includes(keyOf(item.path))) {
+        const tr = await cleanTempRoot(item.path, permanent);
+        let bytes = 0;
+        for (const src of tr.moved) {
+          const rec = cachedRec(st, src);
+          if (rec) bytes += rec.s || 0;
+        }
+        outcomes.push({ path: item.path, ok: tr.ok, error: tr.error, bytes });
+        tempHandled.set(keyOf(item.path), { item, tr });
+        if (tr.ok && tr.skipped.length) {
+          results.push({
+            path: item.path,
+            ok: false,
+            error: tr.skipped.length + ' 个文件/目录被程序占用，已跳过',
+          });
+        }
+      } else {
+        normal.push(item);
       }
+    }
+    if (permanent) {
+      for (const item of normal) outcomes.push(await permanentDelete(item.path, !!item.isDir));
+    } else if (normal.length) {
+      outcomes = outcomes.concat(await runRecycle(normal.map((x) => x.path)));
     }
     for (const r of outcomes) {
       if (!r.ok) continue;
+      const temp = tempHandled.get(keyOf(r.path));
+      if (temp) {
+        applyTempPartialRemoval(st, temp.item.path, temp.tr.moved);
+        continue;
+      }
       const b = before.find((x) => keyOf(x.path) === keyOf(r.path));
       if (b) applyRemoval(st, b.path, b.size, b.isDir, b.existedAtScan);
       try {
@@ -1524,13 +1624,20 @@ async function handleApi(req, res, urlObj) {
     driveListCache = { at: 0, value: null };
     const okCount = outcomes.filter((r) => r.ok).length;
     const failCount = outcomes.filter((r) => !r.ok).length + results.length;
+    const sumOutcomeBytes = (list) =>
+      list.reduce((s, o) => {
+        if (o.bytes != null) return s + o.bytes;
+        const b = before.find((x) => keyOf(x.path) === keyOf(o.path));
+        return s + (b ? b.size : 0);
+      }, 0);
+    const okOutcomes = outcomes.filter((o) => o.ok);
     json(res, 200, {
       results: [...results, ...outcomes],
       okCount,
       failCount,
       drive: st.letter,
-      recycledBytes: route === '/api/recycle' ? before.filter((b) => outcomes.some((o) => o.ok && keyOf(o.path) === keyOf(b.path))).reduce((s, b) => s + b.size, 0) : 0,
-      freedBytes: route === '/api/delete' ? before.filter((b) => outcomes.some((o) => o.ok && keyOf(o.path) === keyOf(b.path))).reduce((s, b) => s + b.size, 0) : 0,
+      recycledBytes: route === '/api/recycle' ? sumOutcomeBytes(okOutcomes) : 0,
+      freedBytes: route === '/api/delete' ? sumOutcomeBytes(okOutcomes) : 0,
     });
     return;
   }

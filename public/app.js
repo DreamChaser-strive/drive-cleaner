@@ -1601,8 +1601,8 @@
     if (valid.length > 12) list.push('<div class="delete-item"><span class="dp">还有 ' + (valid.length - 12) + ' 项…</span><span></span></div>');
     $('#deleteList').innerHTML = list.join('');
     $('#deleteNotice').innerHTML = permanent
-      ? '<svg><use href="#i-alert"/></svg><span>永久删除会立即释放所选磁盘空间，但文件无法恢复。请确认已不再需要。</span>'
-      : '<svg><use href="#i-info"/></svg><span>移到回收站后，文件仍占用磁盘空间；清空回收站后才会真正释放。工具会优先使用系统回收站，可在资源管理器中还原。</span>';
+      ? '<svg><use href="#i-alert"/></svg><span>永久删除会立即释放所选磁盘空间，但文件无法恢复。请确认已不再需要。大目录可能需要几分钟，请保持窗口打开。</span>'
+      : '<svg><use href="#i-info"/></svg><span>移到回收站后，文件仍占用磁盘空间；清空回收站后才会真正释放。工具会优先使用系统回收站，可在资源管理器中还原。大目录可能需要几十秒到几分钟，请保持窗口打开。</span>';
     $('#permanentConfirmLine').classList.toggle('hidden', !permanent);
     $('#permanentConfirm').checked = false;
     const btn = $('#confirmDeleteBtn');
@@ -1635,13 +1635,22 @@
     state.deleteBusy = true;
     const btn = $('#confirmDeleteBtn');
     const old = btn.innerHTML;
+    const started = Date.now();
     btn.disabled = true;
-    btn.innerHTML = '<span class="loader" style="width:14px;height:14px;border-width:2px"></span> 正在处理…';
+    const renderBusy = () => {
+      const sec = Math.floor((Date.now() - started) / 1000);
+      btn.innerHTML =
+        '<span class="loader" style="width:14px;height:14px;border-width:2px"></span> 正在处理… ' +
+        (sec > 0 ? sec + ' 秒' : '');
+    };
+    renderBusy();
+    const timer = setInterval(renderBusy, 1000);
     try {
       const res = await api(permanent ? '/api/delete' : '/api/recycle', {
         method: 'POST',
         body: permanent ? { paths: unique, confirm: 'DELETE' } : { paths: unique },
       });
+      clearInterval(timer);
       state.deleteBusy = false;
       $('#deleteModal').classList.add('hidden');
       state.deleteItems = [];
@@ -1666,6 +1675,7 @@
       }
       await refreshAfterDelete(unique);
     } catch (e) {
+      clearInterval(timer);
       state.deleteBusy = false;
       btn.disabled = permanent;
       btn.innerHTML = old;

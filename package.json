@@ -1,6 +1,6 @@
 {
   "name": "drive-cleaner",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "Windows 磁盘空间可视化分析与安全清理工具",
   "author": "DreamChaser-strive",
